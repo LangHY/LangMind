@@ -5,28 +5,36 @@
 # YaRN
 
 import torch
-
+print("=====torch.where=====")
 x = torch.tensor([1, 2, 3, 4, 5])
 y = torch.tensor([10, 20, 30, 40, 50])
 
 condition = x > 3
 print(condition)
 result = torch.where(condition, x, y)
+# Return a tensor of elements selected from either input or other, depending on condition.
 # 条件过滤：condition=True时x对应的元素保留，condition=False时x对应的元素由 y对应的替代
 print(result)
 
+
+print("=====torch.arange=====")
+# start, end, step -> tensor
 t = torch.arange(0, 10, 2)
 print(t)
 
 t = torch.arange(5, 0, -1)
 print(t)
 
+
+print("=====torch.outer=====")
 v1 = torch.tensor([1, 2, 3])
 v2 = torch.tensor([4, 5, 6])
 result = torch.outer(v1, v2)
 # 外积：用v1的每个元素乘v2 
 print(result)
 
+
+print("=====torch.cat=====")
 t1 = torch.tensor([[[1, 2, 3], [4, 5, 6]], [[13, 14, 15], [16, 17, 18]]])
 t2 = torch.tensor([[[7, 8, 9], [10, 11, 12]], [[19, 20, 21], [22, 23, 24]]])
 print(t1.shape)
@@ -39,7 +47,7 @@ print(f"shape = {result.shape}\ncat第 1 维 = {result}")
 
 result = torch.cat((t1, t2), dim=-1)
 print(f"shape = {result.shape}\ncat第 2 维（最后一维） = {result}")
-
+print("=====unsqueeze=====")
 t1 = torch.tensor([1, 2, 3])
 t2 = t1.unsqueeze(dim=0)
 # 在dim前扩展一维

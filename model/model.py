@@ -80,6 +80,7 @@ import math
 from typing import Optional
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 # RMSNorm需要继承nn.module类（神经网络层）
 class RMSNorm(nn.Module):
 #__init__
@@ -208,3 +209,114 @@ def precompute_freqs_cis(dim:int, end:int=32*1024, rope_base:int=1000000, rope_s
     # 4) 转成复数 e^{i*angle}(实部=cos, 虚部=sin)，供 apply_rotary_emb 用复数乘法旋转
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
+
+def repeat_kv(x:torch.Tensor, n_rep:int) -> torch.Tensor:
+    bs, slen, num_key_value_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    
+    return (
+            x[:,:,:,None, :]
+            .expand(bs, slen, num_key_value_heads, n_rep, head_dim)
+            .reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
+            )
+def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> tuple:
+    """将 precompute_freqs_cis 预计算的旋转角作用到 Q/K 上（复数乘法 = 旋转）"""
+    # [bs, seq, head, dim] -> [bs, seq, head, dim/2, 2(实部,虚部)] -> 复数张量
+    # 相邻两维配成一对 (x1+i*x2)，旋转时它们一起转，信息不丢
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    # freqs_cis: [seq, dim/2] -> [1, seq, 1, dim/2]，广播到所有 batch 和所有头
+    freqs_cis = freqs_cis[None, : xq.shape[1], None, :]
+    # 复数相乘 = 角度相加 = 旋转；再转回实数并拍平最后一维
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+class Attention(nn.Module):
+    """分组查询注意力 (Grouped-Query Attention, GQA)
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │ 方案    │ Q 头数 │ KV 头数 │ KV cache 大小 │ 质量                 │
+    ├──────────────────────────────────────────────────────────────────┤
+    │ MHA     │   8    │   8     │  1x (基准)    │ 基准                 │
+    │ MQA     │   8    │   1     │  1/8          │ 明显掉点             │
+    │ GQA     │   8    │   2     │  1/4          │ 接近 MHA（本实现）   │
+    └──────────────────────────────────────────────────────────────────┘
+    类比：8 位编辑(Q头)都要查资料库(K/V 头)
+      - MHA：每人配一个专属资料员 → 又快又准，但养 8 个人太贵
+      - MQA：全公司只请 1 个资料员 → 省钱，但忙不过来、质量下降
+      - GQA：每 4 位编辑共享 1 名资料员（共 2 名）→ 省钱且质量几乎无损
+    LLaMA-2 70B / LLaMA-3 全系都采用 GQA。
+    """
+    def __init__(self, args: MokioMindConfig):
+        super().__init__()
+
+        # 兼容未配置 kv 头数的情况：退化为标准 MHA
+        self.num_key_value_heads = (
+            args.num_key_value_heads
+            if args.num_key_value_heads is not None
+            else args.num_attention_heads
+        )
+        # Q 头数必须能被 KV 头数整除，否则分组不均、repeat 后头数对不上
+        assert (
+            args.num_attention_heads % self.num_key_value_heads == 0
+        ), "num_attention_heads must be divisible by num_key_value_heads"
+
+        self.n_local_heads = args.num_attention_heads              # Q 头数: 8
+        self.n_local_kv_heads = self.num_key_value_heads          # KV 头数: 2
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads  # 组大小: 4 个 Q 头共享 1 个 KV 头
+        self.head_dim = args.hidden_size // args.num_attention_heads  # 单头维度: 512 / 8 = 64
+
+        # Q 投影输出全部 8 个头；K/V 投影只输出 2 个头 → 参数量与激活值都降为 1/4
+        self.wq = nn.Linear(args.hidden_size, self.n_local_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(self.n_local_heads * self.head_dim, args.hidden_size, bias=False)
+
+        self.attn_dropout = args.dropout
+        self.flash_attention = args.flash_attention
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        bs, seq_len, _ = x.shape  # [batch, seq_len, hidden_size]
+
+        # 1) 线性投影并"切头"：Q 切成 8 头，K/V 只切成 2 头 —— GQA 从这里就开始省
+        xq = self.wq(x).view(bs, seq_len, self.n_local_heads, self.head_dim)     # [bs, s, 8, 64]
+        xk = self.wk(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
+        xv = self.wv(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
+
+        # 2) 只对 Q/K 施加 RoPE 旋转（V 不携带位置信息，不需要旋转）
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+
+        # 3) GQA 核心：把 2 个 KV 头各复制 4 份"撑"成 8 个，与 Q 头数对齐
+        #    分组规则是"相邻为一组"：Q头 0~3 用 KV头0，Q头 4~7 用 KV头1
+        xk = repeat_kv(xk, self.n_rep)  # [bs, s, 2, 64] -> [bs, s, 8, 64]
+        xv = repeat_kv(xv, self.n_rep)
+
+        # 4) [bs, seq, head, dim] -> [bs, head, seq, dim]，让 matmul 在后两维 (seq, dim) 上做
+        xq = xq.transpose(1, 2)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
+        if self.flash_attention:
+            # PyTorch 融合算子：因果掩码、缩放、softmax 全在算子内部高效完成（FlashAttention 后端）
+            output = torch.nn.functional.scaled_dot_product_attention(
+                xq, xk, xv,
+                is_causal=True,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+            )
+        else:
+            # 手写注意力路径：QK^T / sqrt(d_k) + 因果掩码 + softmax + 加权 V
+            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = scores + mask  # mask 形如 [1, 1, seq, seq]，靠广播对齐所有头
+            # softmax 前转 float32 防止 bf16 下溢出（与 RMSNorm 里的 .float() 同理）
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = F.dropout(scores, p=self.attn_dropout if self.training else 0.0)
+            output = torch.matmul(scores, xv)
+
+        # 5) [bs, head, seq, dim] -> [bs, seq, head*dim=512]，再投影回 hidden_size
+        output = output.transpose(1, 2).contiguous().view(bs, seq_len, -1)
+        return self.wo(output)
+
