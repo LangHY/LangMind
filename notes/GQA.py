@@ -62,35 +62,40 @@ w_K = torch.randn(8, 8)
 w_V = torch.randn(8, 8)
 
 
-def Attention(X:torch.tensor, w_Q:torch.tensor, w_K:torch.tensor, w_V:torch.tensor, nums_head:int):
+def Attention(X:torch.Tensor, 
+                nums_head:int, 
+                nums_kv:int
+                ):
     # 计算输入 token 的 QKV
     Q = torch.tensor(X @ w_Q)
-    K = torch.tensor(X @ w_K)
-    V = torch.tensor(X @ w_V)
-    print(f"Q_shape = {Q.shape}")
-    print(f"K_shape = {K.shape}")
-    print(f"V_shape = {V.shape}")
-    print(f"K^T = {K.transpose(-1, -2).shape}")
-
-
+    
     seq = (Q.shape[-2]) # token数量
     batch = Q.shape[0] #batch数
     d_token = X.shape[-1] #token的维度（用于计算注意力头分得的维度）
-    d_K = list(K.shape)[-1] #K的维度（ 用于计算 attention）
+    
     #依据注意力头数计算每个注意力头分得的维度（Head QKV 的维度）
     d_Head = int(d_token / nums_head)
+    kv_dim = nums_kv * d_Head #每个注意力头做 attention 用的 dK 是分得的维度数，不是总维度数
 
+    W_K = torch.randn(d_token, kv_dim)
+    W_V = torch.randn(d_token, kv_dim)
+    K = torch.tensor(X @ W_K)
+    V = torch.tensor(X @ W_V)
 
     # 依据注意力头数拆 token
     Q = Q.view(batch, seq, nums_head, d_Head)
-    K = K.view(batch, seq, nums_head, d_Head)
+    K = K.view(batch, seq, nums_kv, d_Head)
+    V = V.view(batch, seq, nums_kv, d_Head)
     # [batch, seq, nums_head, head_dim]
     # [2,     4,   2,      4]
-    print(Q.shape, K.shape)
+    print(Q.shape, K.shape, V.shape)
 
     Q = Q.transpose(1, 2)
     K = K.transpose(1, 2)
-    print(Q.shape, K.shape)
+    V = V.transpose(1, 2)
+    print(Q.shape, K.shape, V.shape)
+
+    
     # [batch, nums_head, seq, head_dim]
     # PyTorch 的批量矩阵乘法：
     # 默认会把：
@@ -106,14 +111,25 @@ def Attention(X:torch.tensor, w_Q:torch.tensor, w_K:torch.tensor, w_V:torch.tens
     # token
     # dim
 
+    group_size = nums_head // nums_kv
+    K = K.repeat_interleave(group_size, dim=1)
+    V = V.repeat_interleave(group_size, dim=1)
+
     score = Q @ (K.transpose(-1, -2))
     print(f"score = {score.shape}")
     # [batch, nums_head, query token, key token]
-    score = score / math.sqrt(d_K)
+    score = score / math.sqrt(d_Head)
 
     attention = (torch.softmax(score, dim=-1)) @ V
+    # 合并 Head
+    attention = attention.transpose(1, 2)
+    attention = attention.reshape(batch, seq, nums_head * d_Head)
+    print(f"attention.shape = {attention.shape}")
+
+    Liner = nn.Linear(attention.shape[-1], attention.shape[-1], bias=False)
+    attention = Liner(attention)
     return attention
 
 
-result = Attention(X, w_Q, w_K, w_V, nums_head=2)
-print(result)
+result = Attention(X, w_Q, w_K, w_V, nums_head=4, nums_kv=2)
+print(result.shape)
