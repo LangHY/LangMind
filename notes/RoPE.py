@@ -55,4 +55,32 @@ print(t1.shape)
 print(t2)
 print(t2.shape)
 
+print("==========")
 
+x = torch.arange(1, 9)
+# x = torch.randn(2, 3, 3)
+
+theta = torch.tensor(0.5)
+def RoPE(x:torch.Tensor, theta:torch.Tensor):
+    
+    even = x[0::2]
+    odd = x[1::2]
+
+    cos_theta = torch.cos(theta)
+    sin_theta = torch.sin(theta)
+
+    print(x)
+    # print(x[0]) # 打印第一个维度的第零个元素
+
+    rotated_even = even * cos_theta - odd * sin_theta
+    rotated_odd = even * sin_theta + odd * cos_theta
+    # 分组（一奇加一偶）
+
+    result = torch.empty_like(x)
+    # 设定一个跟x形状相同的空张量
+    result[0::2] = rotated_even
+    result[1::2] = rotated_odd
+    # 奇偶重新插入
+    return result
+
+print(RoPE(x, theta=torch.tensor(0.5)))
