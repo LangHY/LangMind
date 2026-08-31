@@ -1,5 +1,7 @@
 # from turtle import forward
 
+from mpmath import eps
+from sympy.multipledispatch.conflict import consistent
 from transformers import PretrainedConfig
 
 
@@ -82,241 +84,318 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # RMSNorm需要继承nn.module类（神经网络层）
-class RMSNorm(nn.Module):
-#__init__
-    def __init__(self, dim:int, eps:float=1e-5):
-    # 传入维度以及伊普西隆
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        # 创建可学习参数：权重
-        self.weight = nn.Parameter(torch.ones(dim))
+# class RMSNorm(nn.Module):
+# #__init__
+#     def __init__(self, dim:int, eps:float=1e-5):
+#     # 传入维度以及伊普西隆
+#         super().__init__()
+#         self.dim = dim
+#         self.eps = eps
+#         # 创建可学习参数：权重
+#         self.weight = nn.Parameter(torch.ones(dim))
 
-# _norm
-    def _norm(self, x):
-        eps = self.eps
-        pow_mean = x.pow(x).mean(-1, keepdim=True)
-        result = torch.rsqrt(pow_mean + eps)
-        #返回缩放因子
-        return result
+# # _norm
+#     def _norm(self, x):
+#         eps = self.eps
+#         pow_mean = x.pow(x).mean(-1, keepdim=True)
+#         result = torch.rsqrt(pow_mean + eps)
+#         #返回缩放因子
+#         return result
 
-    def forward(self, x):
-        return self.weight * self._norm(x.float()).type_as(x) * x
-        # x.float() 先将输入转换成float32精度再计算
-        # .type_as(x) 再将x转换为原来的类型
-        # 缩放因子乘以输入乘以权重
+#     def forward(self, x):
+#         return self.weight * self._norm(x.float()).type_as(x) * x
+#         # x.float() 先将输入转换成float32精度再计算
+#         # .type_as(x) 再将x转换为原来的类型
+#         # 缩放因子乘以输入乘以权重
 
 
-# YaRN (Yet another RoPE extensioN)：推理时把训练阶段学到的短上下文 RoPE 外推到更长序列
-def precompute_freqs_cis(dim:int, end:int=32*1024, rope_base:int=1000000, rope_scaling:Optional[dict] = None):
-    """
-    YaRN (Yet another RoPE extensioN)：用只训练过 2k 上下文的模型，去服务 32k 超长输入。
+# # YaRN (Yet another RoPE extensioN)：推理时把训练阶段学到的短上下文 RoPE 外推到更长序列
+# def precompute_freqs_cis(dim:int, end:int=32*1024, rope_base:int=1000000, rope_scaling:Optional[dict] = None):
+#     """
+#     YaRN (Yet another RoPE extensioN)：用只训练过 2k 上下文的模型，去服务 32k 超长输入。
 
-    =========================== 钟的类比（理解 YaRN 的钥匙）===========================
-    RoPE = 给每个 token 发"一排转速不同的钟"，指针角度 = 它的位置。
-      - 快钟：转得快，管"近距离精细分辨"，但很快转满一圈会撞车；
-      - 慢钟：转得慢，管"远距离不撞车"，但训练时可能连一圈都没转完。
-    多面钟组合，既能精细分辨近距离、又能不撞车地记住远距离。
-    注：旋转角度记不住"转了几圈"（转 360° 等于没转），所以不能靠圈数计数器，
-        而是用"一排转速不同的钟"来顶替——最慢的几面天然充当远距离分辨员。
+#     =========================== 钟的类比（理解 YaRN 的钥匙）===========================
+#     RoPE = 给每个 token 发"一排转速不同的钟"，指针角度 = 它的位置。
+#       - 快钟：转得快，管"近距离精细分辨"，但很快转满一圈会撞车；
+#       - 慢钟：转得慢，管"远距离不撞车"，但训练时可能连一圈都没转完。
+#     多面钟组合，既能精细分辨近距离、又能不撞车地记住远距离。
+#     注：旋转角度记不住"转了几圈"（转 360° 等于没转），所以不能靠圈数计数器，
+#         而是用"一排转速不同的钟"来顶替——最慢的几面天然充当远距离分辨员。
 
-    =========================== 为什么要 YaRN ===========================
-    训练只见过 0~orig_max(2048) 的位置：
-      - 快钟：到 2048 早转了上百圈，整圈表盘走遍了 → 再往外转无所谓(外推 extrapolation)；
-      - 慢钟：到 2048 才挪了表盘一小块 → 一往外走就指到没见过的角度，模型懵了。
-    YaRN 的解法：对慢钟"降速 factor(16) 倍"，把第 32768 个词在慢钟眼里伪装成第 2048 个
-      (因为 32768 × 原速/16 = 2048 × 原速，正是训练末端见过的角度)，让模型只见到熟悉角度；
-      快钟不动；中间的钟平滑过渡。
-    代价：慢钟分辨率掉 16 倍(变糊)，但近距离精细分辨靠快钟兜底，所以无伤大雅。
-    边界：factor 不能无限放大，过大慢钟会糊到没边、快钟外推也撑不住——YaRN 是"有限倍优雅外推"。
+#     =========================== 为什么要 YaRN ===========================
+#     训练只见过 0~orig_max(2048) 的位置：
+#       - 快钟：到 2048 早转了上百圈，整圈表盘走遍了 → 再往外转无所谓(外推 extrapolation)；
+#       - 慢钟：到 2048 才挪了表盘一小块 → 一往外走就指到没见过的角度，模型懵了。
+#     YaRN 的解法：对慢钟"降速 factor(16) 倍"，把第 32768 个词在慢钟眼里伪装成第 2048 个
+#       (因为 32768 × 原速/16 = 2048 × 原速，正是训练末端见过的角度)，让模型只见到熟悉角度；
+#       快钟不动；中间的钟平滑过渡。
+#     代价：慢钟分辨率掉 16 倍(变糊)，但近距离精细分辨靠快钟兜底，所以无伤大雅。
+#     边界：factor 不能无限放大，过大慢钟会糊到没边、快钟外推也撑不住——YaRN 是"有限倍优雅外推"。
 
-    =========================== 步骤 ↔ 代码 对照 ===========================
-      1. 一排钟的转速表            freqs = 1.0 / (rope_base ** (...))        # 见下"1)"
-      2. 读 YaRN 配置              orig_max, factor, beta_fast, beta_slow    # 见下 if rope_scaling
-      3. 圈数→钟索引的翻译器        find_correction_dim / find_correction_range
-      4. 算出快/慢分界 low,high    low, high = find_correction_range(...)
-      5. 慢钟降速 factor 倍        inv_freq_interpolation = freqs / factor
-      6. ramp 旋钮平滑过渡          freqs = interpolation*ramp + extrapolation*(1-ramp)
-      7. attention 对数级补偿       attn_factor = ...   # 注意是对数级，不是指数！
-      8. 位置 × 转速 = 角度         freqs = torch.outer(t, freqs) * attn_factor
-      9. 角度 → 复数指针 e^{iθ}     freqs_cis = torch.polar(ones, freqs)
+#     =========================== 步骤 ↔ 代码 对照 ===========================
+#       1. 一排钟的转速表            freqs = 1.0 / (rope_base ** (...))        # 见下"1)"
+#       2. 读 YaRN 配置              orig_max, factor, beta_fast, beta_slow    # 见下 if rope_scaling
+#       3. 圈数→钟索引的翻译器        find_correction_dim / find_correction_range
+#       4. 算出快/慢分界 low,high    low, high = find_correction_range(...)
+#       5. 慢钟降速 factor 倍        inv_freq_interpolation = freqs / factor
+#       6. ramp 旋钮平滑过渡          freqs = interpolation*ramp + extrapolation*(1-ramp)
+#       7. attention 对数级补偿       attn_factor = ...   # 注意是对数级，不是指数！
+#       8. 位置 × 转速 = 角度         freqs = torch.outer(t, freqs) * attn_factor
+#       9. 角度 → 复数指针 e^{iθ}     freqs_cis = torch.polar(ones, freqs)
 
-    =========================== 避坑 ===========================
-      - dim 是"单个头的完整维度"(如 64)，freqs 长度是 dim//2；别和 HF 内部"已折半的 dim"混淆。
-      - 复数 .angle() 会绕回 (-π, π]：调试时 16.0 显示成 -2.85 是同一个角 mod 2π，比较旋转用 cos/sin。
-      - torch.polar 要求 float；bf16 训练时这里算 fp32 再转。
-      - freqs_cis 是"位置→常量"，应在 __init__ 算一次缓存(register_buffer)，别每个 batch 重算。
-      - attn_factor 千万别写成 (end/orig_max)**(beta_fast/beta_slow)，会爆炸到 1e38 毁掉 attention。
+#     =========================== 避坑 ===========================
+#       - dim 是"单个头的完整维度"(如 64)，freqs 长度是 dim//2；别和 HF 内部"已折半的 dim"混淆。
+#       - 复数 .angle() 会绕回 (-π, π]：调试时 16.0 显示成 -2.85 是同一个角 mod 2π，比较旋转用 cos/sin。
+#       - torch.polar 要求 float；bf16 训练时这里算 fp32 再转。
+#       - freqs_cis 是"位置→常量"，应在 __init__ 算一次缓存(register_buffer)，别每个 batch 重算。
+#       - attn_factor 千万别写成 (end/orig_max)**(beta_fast/beta_slow)，会爆炸到 1e38 毁掉 attention。
 
-    配置示例(MokioMindConfig): factor=16, orig_max=2048, beta_fast=32, beta_slow=1,
-                              end=32768, dim=64 → 共 32 面钟, low=5, high=14。
-    """
-    # 1) 基础逆频率：freqs[i] = 1 / rope_base^(2i/dim)
-    #    i 小 → freqs 大 → 波长短(高频维)；i 大 → freqs 小 → 波长长(低频维)
-    freqs = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    attn_factor = 1.0
+#     配置示例(MokioMindConfig): factor=16, orig_max=2048, beta_fast=32, beta_slow=1,
+#                               end=32768, dim=64 → 共 32 面钟, low=5, high=14。
+#     """
+#     # 1) 基础逆频率：freqs[i] = 1 / rope_base^(2i/dim)
+#     #    i 小 → freqs 大 → 波长短(高频维)；i 大 → freqs 小 → 波长长(低频维)
+#     freqs = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+#     attn_factor = 1.0
 
-    if rope_scaling is not None:
-        orig_max, factor, beta_fast, beta_slow = (
-            rope_scaling["original_max_position_embeddings"],  # 训练时的最大长度
-            rope_scaling["factor"],                            # 期望放大的倍数
-            rope_scaling["beta_fast"],                         # 高频边界(旋转圈数)
-            rope_scaling["beta_slow"],                         # 低频边界(旋转圈数)
-        )
+#     if rope_scaling is not None:
+#         orig_max, factor, beta_fast, beta_slow = (
+#             rope_scaling["original_max_position_embeddings"],  # 训练时的最大长度
+#             rope_scaling["factor"],                            # 期望放大的倍数
+#             rope_scaling["beta_fast"],                         # 高频边界(旋转圈数)
+#             rope_scaling["beta_slow"],                         # 低频边界(旋转圈数)
+#         )
 
-        # ---- YaRN 核心：按"旋转圈数"把频率维度切成三段，分别用不同策略 ----
-        # find_correction_dim：某维在训练长度内正好转完 num_rotations 圈，反解出该维索引
-        def find_correction_dim(num_rotations, dim, base, max_pos):
-            return (dim * math.log(max_pos / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+#         # ---- YaRN 核心：按"旋转圈数"把频率维度切成三段，分别用不同策略 ----
+#         # find_correction_dim：某维在训练长度内正好转完 num_rotations 圈，反解出该维索引
+#         def find_correction_dim(num_rotations, dim, base, max_pos):
+#             return (dim * math.log(max_pos / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
 
-        # find_correction_range：把 [beta_fast, beta_slow] 两个圈数阈值映射成维度区间 [low, high]
-        def find_correction_range(low_rot, high_rot, dim, base, max_pos):
-            low = math.floor(find_correction_dim(low_rot, dim, base, max_pos))
-            high = math.ceil(find_correction_dim(high_rot, dim, base, max_pos))
-            return max(low, 0), min(high, dim - 1)
+#         # find_correction_range：把 [beta_fast, beta_slow] 两个圈数阈值映射成维度区间 [low, high]
+#         def find_correction_range(low_rot, high_rot, dim, base, max_pos):
+#             low = math.floor(find_correction_dim(low_rot, dim, base, max_pos))
+#             high = math.ceil(find_correction_dim(high_rot, dim, base, max_pos))
+#             return max(low, 0), min(high, dim - 1)
 
-        # linear_ramp_mask：在 [low, high] 之间生成 0→1 的线性斜坡
-        #   索引 < low → 0(高频维，走外推)；索引 > high → 1(低频维，走插值)
-        def linear_ramp_mask(low, high, n):
-            if low == high:
-                high += 0.001  # 避免除零，保证斜坡至少有一点点宽度
-            linear = (torch.arange(n, dtype=torch.float32) - low) / (high - low)
-            return torch.clamp(linear, 0, 1)
+#         # linear_ramp_mask：在 [low, high] 之间生成 0→1 的线性斜坡
+#         #   索引 < low → 0(高频维，走外推)；索引 > high → 1(低频维，走插值)
+#         def linear_ramp_mask(low, high, n):
+#             if low == high:
+#                 high += 0.001  # 避免除零，保证斜坡至少有一点点宽度
+#             linear = (torch.arange(n, dtype=torch.float32) - low) / (high - low)
+#             return torch.clamp(linear, 0, 1)
 
-        low, high = find_correction_range(beta_fast, beta_slow, dim, rope_base, orig_max)
+#         low, high = find_correction_range(beta_fast, beta_slow, dim, rope_base, orig_max)
 
-        # 外推(extrapolation)：高频维直接沿用训练时的旋转速度
-        # 插值(interpolation)：低频维把旋转速度按 factor 压缩，等价于位置按 factor 放大
-        inv_freq_extrapolation = freqs
-        inv_freq_interpolation = freqs / factor
+#         # 外推(extrapolation)：高频维直接沿用训练时的旋转速度
+#         # 插值(interpolation)：低频维把旋转速度按 factor 压缩，等价于位置按 factor 放大
+#         inv_freq_extrapolation = freqs
+#         inv_freq_interpolation = freqs / factor
 
-        ramp = linear_ramp_mask(low, high, dim // 2)
-        # ramp≈0 的高频维 → 用 extrapolation；ramp≈1 的低频维 → 用 interpolation
-        freqs = inv_freq_interpolation * ramp + inv_freq_extrapolation * (1 - ramp)
+#         ramp = linear_ramp_mask(low, high, dim // 2)
+#         # ramp≈0 的高频维 → 用 extrapolation；ramp≈1 的低频维 → 用 interpolation
+#         freqs = inv_freq_interpolation * ramp + inv_freq_extrapolation * (1 - ramp)
 
-        # 注意力缩放因子：YaRN 发现外推后 attention 幅值会漂移，需要补偿
-        # 配置里显式给了 attention_factor 就直接用，否则用经验公式 0.1*ln(scale)+1
-        if "attention_factor" in rope_scaling:
-            attn_factor = rope_scaling["attention_factor"]
-        else:
-            scale = end / orig_max if end > orig_max else 1.0
-            attn_factor = 0.1 * math.log(scale) + 1.0
+#         # 注意力缩放因子：YaRN 发现外推后 attention 幅值会漂移，需要补偿
+#         # 配置里显式给了 attention_factor 就直接用，否则用经验公式 0.1*ln(scale)+1
+#         if "attention_factor" in rope_scaling:
+#             attn_factor = rope_scaling["attention_factor"]
+#         else:
+#             scale = end / orig_max if end > orig_max else 1.0
+#             attn_factor = 0.1 * math.log(scale) + 1.0
 
-    # 2) 位置序列 t = [0, 1, ..., end-1]
-    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
-    # 3) 角度矩阵 angles[pos, i] = pos * freqs[i]，再乘上注意力因子
-    freqs = torch.outer(t, freqs) * attn_factor
-    # 4) 转成复数 e^{i*angle}(实部=cos, 虚部=sin)，供 apply_rotary_emb 用复数乘法旋转
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_cis
+#     # 2) 位置序列 t = [0, 1, ..., end-1]
+#     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+#     # 3) 角度矩阵 angles[pos, i] = pos * freqs[i]，再乘上注意力因子
+#     freqs = torch.outer(t, freqs) * attn_factor
+#     # 4) 转成复数 e^{i*angle}(实部=cos, 虚部=sin)，供 apply_rotary_emb 用复数乘法旋转
+#     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+#     return freqs_cis
 
-def repeat_kv(x:torch.Tensor, n_rep:int) -> torch.Tensor:
-    bs, slen, num_key_value_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
+# def repeat_kv(x:torch.Tensor, n_rep:int) -> torch.Tensor:
+#     bs, slen, num_key_value_heads, head_dim = x.shape
+#     if n_rep == 1:
+#         return x
     
-    return (
-            x[:,:,:,None, :]
-            .expand(bs, slen, num_key_value_heads, n_rep, head_dim)
-            .reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
-            )
-def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> tuple:
-    """将 precompute_freqs_cis 预计算的旋转角作用到 Q/K 上（复数乘法 = 旋转）"""
-    # [bs, seq, head, dim] -> [bs, seq, head, dim/2, 2(实部,虚部)] -> 复数张量
-    # 相邻两维配成一对 (x1+i*x2)，旋转时它们一起转，信息不丢
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    # freqs_cis: [seq, dim/2] -> [1, seq, 1, dim/2]，广播到所有 batch 和所有头
-    freqs_cis = freqs_cis[None, : xq.shape[1], None, :]
-    # 复数相乘 = 角度相加 = 旋转；再转回实数并拍平最后一维
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+#     return (
+#             x[:,:,:,None, :]
+#             .expand(bs, slen, num_key_value_heads, n_rep, head_dim)
+#             .reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
+#             )
+# def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> tuple:
+#     """将 precompute_freqs_cis 预计算的旋转角作用到 Q/K 上（复数乘法 = 旋转）"""
+#     # [bs, seq, head, dim] -> [bs, seq, head, dim/2, 2(实部,虚部)] -> 复数张量
+#     # 相邻两维配成一对 (x1+i*x2)，旋转时它们一起转，信息不丢
+#     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+#     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+#     # freqs_cis: [seq, dim/2] -> [1, seq, 1, dim/2]，广播到所有 batch 和所有头
+#     freqs_cis = freqs_cis[None, : xq.shape[1], None, :]
+#     # 复数相乘 = 角度相加 = 旋转；再转回实数并拍平最后一维
+#     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+#     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+#     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-class Attention(nn.Module):
-    """分组查询注意力 (Grouped-Query Attention, GQA)
+# class Attention(nn.Module):
+#     """分组查询注意力 (Grouped-Query Attention, GQA)
 
-    ┌──────────────────────────────────────────────────────────────────┐
-    │ 方案    │ Q 头数 │ KV 头数 │ KV cache 大小 │ 质量                 │
-    ├──────────────────────────────────────────────────────────────────┤
-    │ MHA     │   8    │   8     │  1x (基准)    │ 基准                 │
-    │ MQA     │   8    │   1     │  1/8          │ 明显掉点             │
-    │ GQA     │   8    │   2     │  1/4          │ 接近 MHA（本实现）   │
-    └──────────────────────────────────────────────────────────────────┘
-    类比：8 位编辑(Q头)都要查资料库(K/V 头)
-      - MHA：每人配一个专属资料员 → 又快又准，但养 8 个人太贵
-      - MQA：全公司只请 1 个资料员 → 省钱，但忙不过来、质量下降
-      - GQA：每 4 位编辑共享 1 名资料员（共 2 名）→ 省钱且质量几乎无损
-    LLaMA-2 70B / LLaMA-3 全系都采用 GQA。
-    """
-    def __init__(self, args: MokioMindConfig):
+#     ┌──────────────────────────────────────────────────────────────────┐
+#     │ 方案    │ Q 头数 │ KV 头数 │ KV cache 大小 │ 质量                 │
+#     ├──────────────────────────────────────────────────────────────────┤
+#     │ MHA     │   8    │   8     │  1x (基准)    │ 基准                 │
+#     │ MQA     │   8    │   1     │  1/8          │ 明显掉点             │
+#     │ GQA     │   8    │   2     │  1/4          │ 接近 MHA（本实现）   │
+#     └──────────────────────────────────────────────────────────────────┘
+#     类比：8 位编辑(Q头)都要查资料库(K/V 头)
+#       - MHA：每人配一个专属资料员 → 又快又准，但养 8 个人太贵
+#       - MQA：全公司只请 1 个资料员 → 省钱，但忙不过来、质量下降
+#       - GQA：每 4 位编辑共享 1 名资料员（共 2 名）→ 省钱且质量几乎无损
+#     LLaMA-2 70B / LLaMA-3 全系都采用 GQA。
+#     """
+#     def __init__(self, args: MokioMindConfig):
+#         super().__init__()
+
+#         # 兼容未配置 kv 头数的情况：退化为标准 MHA
+#         self.num_key_value_heads = (
+#             args.num_key_value_heads
+#             if args.num_key_value_heads is not None
+#             else args.num_attention_heads
+#         )
+#         # Q 头数必须能被 KV 头数整除，否则分组不均、repeat 后头数对不上
+#         assert (
+#             args.num_attention_heads % self.num_key_value_heads == 0
+#         ), "num_attention_heads must be divisible by num_key_value_heads"
+
+#         self.n_local_heads = args.num_attention_heads              # Q 头数: 8
+#         self.n_local_kv_heads = self.num_key_value_heads          # KV 头数: 2
+#         self.n_rep = self.n_local_heads // self.n_local_kv_heads  # 组大小: 4 个 Q 头共享 1 个 KV 头
+#         self.head_dim = args.hidden_size // args.num_attention_heads  # 单头维度: 512 / 8 = 64
+
+#         # Q 投影输出全部 8 个头；K/V 投影只输出 2 个头 → 参数量与激活值都降为 1/4
+#         self.wq = nn.Linear(args.hidden_size, self.n_local_heads * self.head_dim, bias=False)
+#         self.wk = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
+#         self.wv = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
+#         self.wo = nn.Linear(self.n_local_heads * self.head_dim, args.hidden_size, bias=False)
+
+#         self.attn_dropout = args.dropout
+#         self.flash_attention = args.flash_attention
+
+#     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None):
+#         bs, seq_len, _ = x.shape  # [batch, seq_len, hidden_size]
+
+#         # 1) 线性投影并"切头"：Q 切成 8 头，K/V 只切成 2 头 —— GQA 从这里就开始省
+#         xq = self.wq(x).view(bs, seq_len, self.n_local_heads, self.head_dim)     # [bs, s, 8, 64]
+#         xk = self.wk(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
+#         xv = self.wv(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
+
+#         # 2) 只对 Q/K 施加 RoPE 旋转（V 不携带位置信息，不需要旋转）
+#         xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+
+#         # 3) GQA 核心：把 2 个 KV 头各复制 4 份"撑"成 8 个，与 Q 头数对齐
+#         #    分组规则是"相邻为一组"：Q头 0~3 用 KV头0，Q头 4~7 用 KV头1
+#         xk = repeat_kv(xk, self.n_rep)  # [bs, s, 2, 64] -> [bs, s, 8, 64]
+#         xv = repeat_kv(xv, self.n_rep)
+
+#         # 4) [bs, seq, head, dim] -> [bs, head, seq, dim]，让 matmul 在后两维 (seq, dim) 上做
+#         xq = xq.transpose(1, 2)
+#         xk = xk.transpose(1, 2)
+#         xv = xv.transpose(1, 2)
+
+#         if self.flash_attention:
+#             # PyTorch 融合算子：因果掩码、缩放、softmax 全在算子内部高效完成（FlashAttention 后端）
+#             output = torch.nn.functional.scaled_dot_product_attention(
+#                 xq, xk, xv,
+#                 is_causal=True,
+#                 dropout_p=self.attn_dropout if self.training else 0.0,
+#             )
+#         else:
+#             # 手写注意力路径：QK^T / sqrt(d_k) + 因果掩码 + softmax + 加权 V
+#             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+#             if mask is not None:
+#                 scores = scores + mask  # mask 形如 [1, 1, seq, seq]，靠广播对齐所有头
+#             # softmax 前转 float32 防止 bf16 下溢出（与 RMSNorm 里的 .float() 同理）
+#             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+#             scores = F.dropout(scores, p=self.attn_dropout if self.training else 0.0)
+#             output = torch.matmul(scores, xv)
+
+#         # 5) [bs, head, seq, dim] -> [bs, seq, head*dim=512]，再投影回 hidden_size
+#         output = output.transpose(1, 2).contiguous().view(bs, seq_len, -1)
+#         return self.wo(output)
+
+
+# class rmsnorm(nn.Module):
+#     def __init__(self, hidden_size:int, eps=1e-5):
+#         super().__init__()
+
+#         self.eps = eps
+#         self.weight = nn.Parameter( # 表示self.weight是模型参数 参与反向传播 
+#             torch.ones(hidden_size) #初始化全部设为 1 不改变归一化的结果
+#         )
+#         # weight 允许模型重新学习每个 hidden dimension 应该放大还是缩小。
+
+#     def forward(self, x:torch.Tensor):
+#         rmsnorm = math.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+#         # dim=-1 也就是沿着列变化的方向求平均，也就是沿着行求平均，实际上也就是沿着每个 token 的维度求平均，求得是以 token 为组织单位的平均
+#         # keepdim 决定求平均之后是否保留消掉的维度, true -> 本应消失的维度设为 1
+#         x = (x / rmsnorm) * self.weight
+        
+#         return x
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, config):
         super().__init__()
 
-        # 兼容未配置 kv 头数的情况：退化为标准 MHA
-        self.num_key_value_heads = (
-            args.num_key_value_heads
-            if args.num_key_value_heads is not None
-            else args.num_attention_heads
+        self.eps = config.rms_norm_eps
+        self.weight = nn.Parameter(
+            torch.ones(config.hidden_size)
         )
-        # Q 头数必须能被 KV 头数整除，否则分组不均、repeat 后头数对不上
-        assert (
-            args.num_attention_heads % self.num_key_value_heads == 0
-        ), "num_attention_heads must be divisible by num_key_value_heads"
+        
+    def forward(self, x):
+        return (x / torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)) * self.weight
 
-        self.n_local_heads = args.num_attention_heads              # Q 头数: 8
-        self.n_local_kv_heads = self.num_key_value_heads          # KV 头数: 2
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads  # 组大小: 4 个 Q 头共享 1 个 KV 头
-        self.head_dim = args.hidden_size // args.num_attention_heads  # 单头维度: 512 / 8 = 64
 
-        # Q 投影输出全部 8 个头；K/V 投影只输出 2 个头 → 参数量与激活值都降为 1/4
-        self.wq = nn.Linear(args.hidden_size, self.n_local_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(self.n_local_heads * self.head_dim, args.hidden_size, bias=False)
+class RoPE(nn.Module):
+    def __init__(self, config):
+        super().__init__
 
-        self.attn_dropout = args.dropout
-        self.flash_attention = args.flash_attention
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.max_position_embeddings = (
+            config.max_position_embeddings
+        )
+        self.rope_theta = config.rope_theta
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        bs, seq_len, _ = x.shape  # [batch, seq_len, hidden_size]
+        self.rope_scaling = config.rope_scaling
 
-        # 1) 线性投影并"切头"：Q 切成 8 头，K/V 只切成 2 头 —— GQA 从这里就开始省
-        xq = self.wq(x).view(bs, seq_len, self.n_local_heads, self.head_dim)     # [bs, s, 8, 64]
-        xk = self.wk(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
-        xv = self.wv(x).view(bs, seq_len, self.n_local_kv_heads, self.head_dim)  # [bs, s, 2, 64]
 
-        # 2) 只对 Q/K 施加 RoPE 旋转（V 不携带位置信息，不需要旋转）
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+        inv_freq = 1 / (self.rope_theta ** (
+           2 * range(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
+           self.head_dim
+        ))
 
-        # 3) GQA 核心：把 2 个 KV 头各复制 4 份"撑"成 8 个，与 Q 头数对齐
-        #    分组规则是"相邻为一组"：Q头 0~3 用 KV头0，Q头 4~7 用 KV头1
-        xk = repeat_kv(xk, self.n_rep)  # [bs, s, 2, 64] -> [bs, s, 8, 64]
-        xv = repeat_kv(xv, self.n_rep)
+        self.register_buffer( # 不需要参与训练，但也是模型权重的一部分，与Parameters相对
+            "inv_freq",
+            inv_freq,
+            persistent=False
+        )
 
-        # 4) [bs, seq, head, dim] -> [bs, head, seq, dim]，让 matmul 在后两维 (seq, dim) 上做
-        xq = xq.transpose(1, 2)
-        xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
+        position = torch.range(self.max_position_embeddings, dtype=torch.float32)
 
-        if self.flash_attention:
-            # PyTorch 融合算子：因果掩码、缩放、softmax 全在算子内部高效完成（FlashAttention 后端）
-            output = torch.nn.functional.scaled_dot_product_attention(
-                xq, xk, xv,
-                is_causal=True,
-                dropout_p=self.attn_dropout if self.training else 0.0,
-            )
-        else:
-            # 手写注意力路径：QK^T / sqrt(d_k) + 因果掩码 + softmax + 加权 V
-            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask  # mask 形如 [1, 1, seq, seq]，靠广播对齐所有头
-            # softmax 前转 float32 防止 bf16 下溢出（与 RMSNorm 里的 .float() 同理）
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = F.dropout(scores, p=self.attn_dropout if self.training else 0.0)
-            output = torch.matmul(scores, xv)
+        theta = torch.outer(position, inv_freq)
+        cos = torch.cos(theta)
+        sin = torch.sin(theta)
 
-        # 5) [bs, head, seq, dim] -> [bs, seq, head*dim=512]，再投影回 hidden_size
-        output = output.transpose(1, 2).contiguous().view(bs, seq_len, -1)
-        return self.wo(output)
+        self.register_buffer(
+            "cos_cached",
+            cos,
+            persistent=False # 只在运行时使用，不保存
+        )
+        self.register_buffer(
+            "sin_cached",
+            sin,
+            persistent=False 
+        )
+        
 
+
+        
