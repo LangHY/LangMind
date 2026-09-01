@@ -358,33 +358,36 @@ class RMSNorm(nn.Module):
 class RoPE(nn.Module):
     def __init__(self, config):
         super().__init__
-
+        # 计算每个head的维度
         self.head_dim = config.hidden_size // config.num_attention_heads
+        # 引入seq
         self.max_position_embeddings = (
             config.max_position_embeddings
         )
+        # 引入theta
         self.rope_theta = config.rope_theta
 
         self.rope_scaling = config.rope_scaling
 
-
+        # 计算频率
         inv_freq = 1 / (self.rope_theta ** (
            2 * range(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
            self.head_dim
         ))
-
+        # 存储中间计算结果
         self.register_buffer( # 不需要参与训练，但也是模型权重的一部分，与Parameters相对
             "inv_freq",
             inv_freq,
-            persistent=False
+            persistent=False # 不持久存储
         )
-
+        # 计算位置参数
         position = torch.range(self.max_position_embeddings, dtype=torch.float32)
-
+        # 角度=位置 x 频率
         theta = torch.outer(position, inv_freq)
         cos = torch.cos(theta)
         sin = torch.sin(theta)
 
+        # 保存中间结果
         self.register_buffer(
             "cos_cached",
             cos,
@@ -395,7 +398,11 @@ class RoPE(nn.Module):
             sin,
             persistent=False 
         )
-        
+    
+    def forward(self, x, position_ids):
+        # 引入position_ids
+        cos = self.cos_cached[position_ids]
+        sin = self.sin_cached[position_ids]
 
 
         
