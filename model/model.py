@@ -370,6 +370,7 @@ class RoPE(nn.Module):
         self.rope_scaling = config.rope_scaling
 
         # 计算频率
+        # rope_theta相当于是个基准角度，决定不同维度对的频率如何分布
         inv_freq = 1 / (self.rope_theta ** (
            2 * range(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
            self.head_dim
@@ -380,7 +381,7 @@ class RoPE(nn.Module):
             inv_freq,
             persistent=False # 不持久存储
         )
-        # 计算位置参数
+        # 计算位置参数 创建所有 position 只用于角度计算公式
         position = torch.range(self.max_position_embeddings, dtype=torch.float32)
         # 角度=位置 x 频率
         theta = torch.outer(position, inv_freq)
@@ -388,6 +389,7 @@ class RoPE(nn.Module):
         sin = torch.sin(theta)
 
         # 保存中间结果
+        # shape:[max_position_embeddings, D/2] 也就是每个位置的每个维度对的结果
         self.register_buffer(
             "cos_cached",
             cos,
@@ -399,10 +401,37 @@ class RoPE(nn.Module):
             persistent=False 
         )
     
-    def forward(self, x, position_ids):
-        # 引入position_ids
-        cos = self.cos_cached[position_ids]
-        sin = self.sin_cached[position_ids]
+    def forward(self, q:torch.Tensor, k:torch.Tensor, position_ids:torch.Tensor):
+        # 引入position_ids：[B, S] 表示每个token 的绝对位置
+        # 取出每个 token 对应的角度
+        cos = self.cos_cached[position_ids].squeeze(dim=1)
+        sin = self.sin_cached[position_ids].squeeze(dim=1)
+        # shape:[B, S, D/2]某个batch某个seq的某个维度对的正余弦
+        # 为了广播要挤出一个head维度
+        # shape:[B, 1, S, D/2]
+
+        # 拆分
+        even_q = q[..., 0::2]
+        odd_q = q[..., 1::2]
+
+        even_k = k[..., 0::2]
+        odd_k = k[..., 1::2]
+
+        # 旋转
+        q = torch.stack(
+            [even_q * cos - odd_q * sin, even_q * sin + odd_q * cos],
+            dim = -1
+        ).flatten(-2, -1)
+
+        k = torch.stack(
+            [even_k * cos - odd_k * sin, even_k * sin + odd_k * cos],
+            dim = -1
+        ).flatten(-2, -1)
+
+        return q, k
+
+
+
 
 
         

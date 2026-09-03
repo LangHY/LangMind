@@ -3,6 +3,7 @@ import torch
 
 X = torch.randn(2, 4, 6, 8)
 def rope(X:torch.Tensor):
+    # 以下全部是对形状参数的操作
     batch = X.shape[0]
     head = X.shape[1]
     seq = X.shape[2]
@@ -20,7 +21,8 @@ def rope(X:torch.Tensor):
 
     print(cos_theta.shape)
     print(sin_theta.shape)
-
+    
+    # 以下开始对输入 token 本身操作
     odd = X[..., 1::2] #...表示前面的维度全部保留，否则默认在 0 维度做切片操作
     even = X[..., 0::2]
 
