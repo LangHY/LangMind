@@ -13,27 +13,26 @@ def attn(X:torch.Tensor):
     # 计算每个头分配的 dim
     d_head = dim // num_head
 
-    # 引入 GQA
+    # 引入 GQA：只减少 KV 头的"数量"，每个头的维度 d_head 与 Q 头保持一致
     num_kv = 2
-    # 计算每个 KV 拆分的维度
-    d_kv = dim // num_kv
 
-    # 定义权重
-    W_q = torch.randn(dim, dim)
-    W_k = torch.randn(dim, dim)
-    W_v = torch.randn(dim, dim)
+    # 定义权重：K/V 投影只输出 num_kv 个头，矩阵更小——这正是 GQA 省参数省显存的来源
+    # GQA = 保持每个头的“带宽”（d_head）不变，只减少 K/V 表征的“份数”（num_kv）
+    W_q = torch.randn(dim, num_head * d_head)
+    W_k = torch.randn(dim, num_kv * d_head)
+    W_v = torch.randn(dim, num_kv * d_head)
 
     # 计算 QKV
-    Q = X @ W_q #2x4x8
-    K = X @ W_k #2x4x8
-    V = X @ W_v #2x4x8
+    Q = X @ W_q # 2x4x16 (16 = 4头 x 4维)
+    K = X @ W_k # 2x4x8  (8 = 2头 x 4维)
+    V = X @ W_v # 2x4x8
 
     # 拆分token
     # 关键的是view必须按照前两个参数为batch类，后两个参数为形状类，否则形状错误，语义错乱
     # transpose 负责把num_head和seq对调，以head为组织单位，让多个注意力头放在一起计算
     Q = Q.view(batch, seq, num_head, d_head).transpose(1, 2) # 4 q_head
-    K = K.view(batch, seq, num_kv, d_kv).transpose(1, 2) # 2 kv_head
-    V = V.view(batch, seq, num_kv, d_kv).transpose(1, 2) # 2 kv_head
+    K = K.view(batch, seq, num_kv, d_head).transpose(1, 2) # 2 kv_head，每头依然是 d_head 维
+    V = V.view(batch, seq, num_kv, d_head).transpose(1, 2) # 2 kv_head
     # transpose前：2 4 2 4 表示 2batch 每个batch 4token 每个token分为2 head 每个 head 4 维
 
 

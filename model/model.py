@@ -357,7 +357,7 @@ class RMSNorm(nn.Module):
 
 class RoPE(nn.Module):
     def __init__(self, config):
-        super().__init__
+        super().__init__()
         # 计算每个head的维度
         self.head_dim = config.hidden_size // config.num_attention_heads
         # 引入seq
@@ -370,7 +370,7 @@ class RoPE(nn.Module):
         self.rope_scaling = config.rope_scaling
 
         # 计算频率
-        # rope_theta相当于是个基准角度，决定不同维度对的频率如何分布
+        # rope_theta相当于是一个基准角度，决定不同维度对的频率如何分布
         inv_freq = 1 / (self.rope_theta ** (
            2 * range(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
            self.head_dim
@@ -429,6 +429,41 @@ class RoPE(nn.Module):
         ).flatten(-2, -1)
 
         return q, k
+
+
+class gqa(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_kv_heads
+        self.head_dim = self.hidden_size // self.num_attention_heads
+
+
+    def forward(self, x:torch.Tensor):
+        batch, seq, dim = x.shape
+
+        w_q = nn.Parameter(
+            torch.ones(dim, dim)
+        )
+        w_k = nn.Parameter(
+            torch.ones(dim, dim)
+        )
+        w_v = nn.Parameter(
+            torch.ones(dim, dim)
+        )
+        query = x @ w_q
+        key = x @ w_k
+        value = x @ w_v
+
+        query = query.view(batch, seq, self.num_attention_heads, self.head_dim).transpose(1, 2)
+        key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        return (torch.softmax((query * key.transpose(-2, -1)) / math.sqrt(self.head_dim), dim=-1) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
+
+
 
 
 
