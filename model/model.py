@@ -439,29 +439,30 @@ class gqa(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = self.hidden_size // self.num_attention_heads
-
+        self.group_size = self.num_attention_heads // self.num_kv_heads
+        self.w_q = nn.Parameter(
+            torch.ones(self.hidden_size)
+        )
+        self.w_k = nn.Parameter(
+            torch.ones(self.hidden_size)
+        )
+        self.w_v = nn.Parameter(
+            torch.ones(self.hidden_size)
+        )
 
     def forward(self, x:torch.Tensor):
         batch, seq, dim = x.shape
 
-        w_q = nn.Parameter(
-            torch.ones(dim, dim)
-        )
-        w_k = nn.Parameter(
-            torch.ones(dim, dim)
-        )
-        w_v = nn.Parameter(
-            torch.ones(dim, dim)
-        )
-        query = x @ w_q
-        key = x @ w_k
-        value = x @ w_v
+        
+        query = x @ self.w_q
+        key = x @ self.w_k
+        value = x @ self.w_v
 
         query = query.view(batch, seq, self.num_attention_heads, self.head_dim).transpose(1, 2)
-        key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
+        value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
 
-        return (torch.softmax((query * key.transpose(-2, -1)) / math.sqrt(self.head_dim), dim=-1) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
+        return (torch.softmax((query @ key.transpose(-2, -1)) / math.sqrt(self.head_dim), dim=-1) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
 
 
 
