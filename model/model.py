@@ -1,6 +1,3 @@
-# from turtle import forward
-
-from mpmath import eps
 from sympy.multipledispatch.conflict import consistent
 from transformers import PretrainedConfig
 
@@ -440,29 +437,71 @@ class gqa(nn.Module):
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = self.hidden_size // self.num_attention_heads
         self.group_size = self.num_attention_heads // self.num_kv_heads
-        self.w_q = nn.Parameter(
-            torch.ones(self.hidden_size)
+        # self.training = config.training
+        self.dropout = config.dropout
+        # 通过线性层来获取 QKV 权重，自动变为可训练参数
+        self.w_q = nn.Linear(
+            self.hidden_size,
+            self.head_dim * self.num_attention_heads,
+            bias=False
         )
-        self.w_k = nn.Parameter(
-            torch.ones(self.hidden_size)
+        self.w_k = nn.Linear(
+            self.hidden_size,
+            self.head_dim * self.num_kv_heads,
+            bias=False
         )
-        self.w_v = nn.Parameter(
-            torch.ones(self.hidden_size)
+        self.w_v = nn.Linear(
+            self.hidden_size,
+            self.head_dim * self.num_kv_heads,
+            bias=False
+        )
+        self.w_o = nn.Linear(
+            self.hidden_size, #输入的维度是多个head拼起来的结果
+            self.hidden_size, #经过线性层使不同head的信息充分混合（按照每个head学习到的特征加权）
+            bias=False
         )
 
     def forward(self, x:torch.Tensor):
-        batch, seq, dim = x.shape
+        batch, seq, dim= x.shape
 
         
-        query = x @ self.w_q
-        key = x @ self.w_k
-        value = x @ self.w_v
+        query = self.w_q(x)
+        key = self.w_k(x)
+        value = self.w_v(x)
 
         query = query.view(batch, seq, self.num_attention_heads, self.head_dim).transpose(1, 2)
         key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
         value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
 
-        return (torch.softmax((query @ key.transpose(-2, -1)) / math.sqrt(self.head_dim), dim=-1) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
+        causal_mask = torch.triu( #创建上三角矩阵
+            torch.ones( #形状与
+                seq,
+                seq,
+                dtype=bool,
+                device=x.device
+            ),
+            diagonal=1, #对角线相对于主对角线移动的单位数，主对角线为 0
+        )
+
+        score = (query @ key.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
+        score = score.masked_fill( #对应causal_mask中的 0 和 1,1 对应位置改为最小（-inf）,0 对应位置不变
+            causal_mask,
+            torch.finfo(score.dtype).min #当前张量数据类型所能表示的最小值
+        )
+
+        score = torch.softmax(score, dim=-1) #因为有些元素趋近于-inf，e^-inf = 0,所以就达到了掩码的效果，防止模型看到答案
+
+        #dropout:训练时随机把一部分神经网络产生的信息暂时关掉（置零），防止模型过于依赖某个特征，也就是随机屏蔽一定比例的注意力关系，增加训练随机性
+        score = ((F.dropout(
+            score,
+            p=self.dropout, #置零比例
+            training=self.training #只在训练时启用
+        )) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
+        attention = self.w_o(score) #让不同的head信息充分混合
+        return attention
+
+
 
 
 
