@@ -1,4 +1,4 @@
-from sympy.multipledispatch.conflict import consistent
+# from sympy.multipledispatch.conflict import consistent
 from transformers import PretrainedConfig
 
 
@@ -501,7 +501,7 @@ class gqa(nn.Module):
         attention = self.w_o(score) #让不同的head信息充分混合
         return attention
 
-
+        
 
 
 
