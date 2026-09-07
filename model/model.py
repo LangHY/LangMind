@@ -439,6 +439,7 @@ class gqa(nn.Module):
         self.group_size = self.num_attention_heads // self.num_kv_heads
         # self.training = config.training
         self.dropout = config.dropout
+
         # 通过线性层来获取 QKV 权重，自动变为可训练参数
         self.w_q = nn.Linear(
             self.hidden_size,
@@ -464,7 +465,6 @@ class gqa(nn.Module):
     def forward(self, x:torch.Tensor):
         batch, seq, dim= x.shape
 
-        
         query = self.w_q(x)
         key = self.w_k(x)
         value = self.w_v(x)
@@ -499,6 +499,7 @@ class gqa(nn.Module):
             training=self.training #只在训练时启用
         )) @ value).transpose(1, 2).reshape(batch, seq, self.num_attention_heads * self.head_dim)
         attention = self.w_o(score) #让不同的head信息充分混合
+        
         return attention
 
         
