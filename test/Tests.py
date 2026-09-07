@@ -25,7 +25,9 @@ def test():
     assert y.shape == x.shape # assert:程序自动验证，程序认为这个条件必须为 True；如果不是，就立刻报错
     print(f"shape测试通过")
     assert torch.isfinite(y).all(), f"y_shape = {y.shape}"
-    # assert torch.isnan(y).all(), f"Error:{y}" # 检测是否存在 NaN，如果存在报错
+    # assert torch.isnan(y).all(), f"Error:{y}" # 检测是否存在 NaN，如果不存在报错
+    # assert torch.isnan(y).any(), f"Error:{y}" # 检测是否至少存在一个 NaN，False 报错
+    assert not torch.isnan(y).any(), f"Error:{y}" #检测是否不存在 NaN
     print("数据完整性测试通过")
 
     loss = y.mean()
