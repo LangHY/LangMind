@@ -1,6 +1,6 @@
 import torch
 
-from model.model import gqa
+from model.model import gqa, RoPE, RMSNorm
 
 class TestConfig:
     hidden_size = 512
@@ -11,7 +11,8 @@ class TestConfig:
 
 def test():
     config = TestConfig()
-    test_model = gqa(config)
+    test_gqa = gqa(config)
+
 
     x = torch.randn(
         2,

@@ -42,7 +42,12 @@ class MokioMindConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.hidden_act = hidden_act
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
+        self.intermediate_size = (
+            intermediate_size
+            if intermediate_size is not None
+            else
+                math.ceil(hidden_size * math.pi / 64) * 64
+        )
         self.max_position_embeddings = max_position_embeddings
         self.num_attention_heads = num_attention_heads
         self.num_hidden_layers = num_hidden_layers
@@ -501,6 +506,11 @@ class gqa(nn.Module):
         attention = self.w_o(score) #让不同的head信息充分混合
         
         return attention
+
+class swiglu(nn.Module):
+    def __init__(self, config):
+        self.hidden_size = config.hidden_size
+        self.
 
         
 
