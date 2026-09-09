@@ -21,7 +21,7 @@ def test():
         requires_grad=True # 记录梯度/表示后续要对 X 求梯度（反向传播）
     )
 
-    y = test_model(x)
+    y = test_gqa(x)
 
     assert y.shape == x.shape # assert:程序自动验证，程序认为这个条件必须为 True；如果不是，就立刻报错
     print(f"shape测试通过")

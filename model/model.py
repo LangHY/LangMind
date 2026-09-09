@@ -510,7 +510,17 @@ class gqa(nn.Module):
 class swiglu(nn.Module):
     def __init__(self, config):
         self.hidden_size = config.hidden_size
-        self.
+        self.intermediate_size = config.intermediate_size
+        self.up = nn.Linear(self.hidden_size, self.intermediate_size)
+        self.down = nn.Linear(self.intermediate_size, self.hidden_size)
+
+    def forward(self, x):
+        gate = F.silu(self.up(x))
+        content = self.up(x)
+
+        x = gate * content
+
+        return self.down(x)
 
         
 
