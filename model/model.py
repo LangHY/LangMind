@@ -343,7 +343,7 @@ import torch.nn.functional as F
         
 #         return x
 
-
+#均方根
 class RMSNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -354,7 +354,7 @@ class RMSNorm(nn.Module):
         )
         
     def forward(self, x):
-        return (x / torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)) * self.weight
+        return (x * torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)) * self.weight
 
 
 class RoPE(nn.Module):
@@ -374,7 +374,7 @@ class RoPE(nn.Module):
         # 计算频率
         # rope_theta相当于是一个基准角度，决定不同维度对的频率如何分布
         inv_freq = 1 / (self.rope_theta ** (
-           2 * range(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
+           2 * torch.arange(0, self.head_dim, 2, dtype=torch.float32) /  #float32保证精度
            self.head_dim
         ))
         # 存储中间计算结果
@@ -384,7 +384,7 @@ class RoPE(nn.Module):
             persistent=False # 不持久存储
         )
         # 计算位置参数 创建所有 position 只用于角度计算公式
-        position = torch.range(self.max_position_embeddings, dtype=torch.float32)
+        position = torch.arange(self.max_position_embeddings, dtype=torch.float32)
         # 角度=位置 x 频率
         theta = torch.outer(position, inv_freq)
         cos = torch.cos(theta)
@@ -444,6 +444,7 @@ class gqa(nn.Module):
         self.group_size = self.num_attention_heads // self.num_kv_heads
         # self.training = config.training
         self.dropout = config.dropout
+        self.RoPE = RoPE(config)
 
         # 通过线性层来获取 QKV 权重，自动变为可训练参数
         self.w_q = nn.Linear(
@@ -467,7 +468,7 @@ class gqa(nn.Module):
             bias=False
         )
 
-    def forward(self, x:torch.Tensor):
+    def forward(self, x:torch.Tensor, position_ids:torch.Tensor):
         batch, seq, dim= x.shape
 
         query = self.w_q(x)
@@ -475,8 +476,19 @@ class gqa(nn.Module):
         value = self.w_v(x)
 
         query = query.view(batch, seq, self.num_attention_heads, self.head_dim).transpose(1, 2)
-        key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
-        value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2).repeat_interleave(self.group_size, dim=1)
+        key = key.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        value = value.view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        query = self.RoPE(query, position_ids)
+        key = self.RoPE(key, position_ids)
+        key = torch.repeat_interleave(
+            self.group_size,
+            dim=1
+        )
+        value = torch.repeat_interleave(
+            self.group_size,
+            dim=1
+        )
 
         causal_mask = torch.triu( #创建上三角矩阵
             torch.ones( #形状与
