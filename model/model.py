@@ -509,13 +509,18 @@ class gqa(nn.Module):
 
 class swiglu(nn.Module):
     def __init__(self, config):
+        super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.up = nn.Linear(self.hidden_size, self.intermediate_size)
-        self.down = nn.Linear(self.intermediate_size, self.hidden_size)
+        # up权重负责生成要决定的内容
+        self.up = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        # gate权重负责决定哪些特征通过
+        self.gate = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        #content和gate使用不同的投影权重
 
     def forward(self, x):
-        gate = F.silu(self.up(x))
+        gate = F.silu(self.gate(x))
         content = self.up(x)
 
         x = gate * content
